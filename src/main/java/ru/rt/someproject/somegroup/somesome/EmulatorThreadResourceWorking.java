@@ -111,19 +111,37 @@ public class EmulatorThreadResourceWorking {
     private void DoSomething(String resourseId, short workTimeFrom, short workTimeTo, UUID guid) throws Exception {
         System.out.format("[%s] [%s] Идёт опрос ресурса [%s]. Имя потока [%s]. \n", guid, LocalDateTime.now(), resourseId, Thread.currentThread().getName());
 
-        // Иногда наши потоки будут падать, может быть, не так часто, как здесь (1 к 5),
+        // Иногда наши потоки будут падать, может быть, не так часто, как здесь (1 к 8),
         // но на всякий случай предусмотрим и такое поведение.
-        short randomForErr = GetGeneratedRandomShort((short)1, (short)5);
+        short randomForErr = GetGeneratedRandomShort((short)1, (short)8);
         if (randomForErr == 4) throw new Exception("Ошибка русской рулетки!");
 
-        // В случае прерывания потоков прервём штатно исполнениня текущего потока.
-        // Разумеется, это сработает только, если внутри потока флаг interrupted обрабатывается,
-        // в противном случае это бесполезно.
+        // Также предусмотрем поведение - прерывание потоков. Interrupt будет штатно прерывать наш поток.
+        // Однако прерываться будет лишь внутренняя логика, если, конечно, в ней это будет предусмотрено.
+        // В нашем случае interrupt только создаёт видимость прерывания.
+        // В случае с ScheduledExecutorService мы не теряем поток после interrupt(), и он снова
+        // продолжит работу в новой итерации. Так не придётся тратить ресурсы на пересоздание потоков.
+
+        // В этой строке сейчас нет никакого смысла, она здесь для демонстрации, однако команда на прерывание потока может прийти внезапно
+        // вне текущей инструкции. Например, у нас предусмотрен ShutdownHook.
+        if (randomForErr == 5) Thread.currentThread().interrupt();
+
         try {
-            Thread.sleep(GetGeneratedRandomShort(workTimeFrom, workTimeTo) * 1000);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("Поток был прерван во время работы с ресурсом", e);
+            short iterQty = GetGeneratedRandomShort(workTimeFrom, workTimeTo);
+
+            for (short i = 1; i <= iterQty; i++){
+                if (Thread.currentThread().isInterrupted()) {
+                    System.out.printf("[%s] [%s] Поток [%s] прерван внешней командой.\n", guid, LocalDateTime.now(), Thread.currentThread().getName());
+                    return;
+                }
+                Thread.sleep(1000);
+                System.out.printf("[%s] [%s] Поток [%s] работает [%d] сек. с ресурсом [%s]\n", guid, LocalDateTime.now(), Thread.currentThread().getName(), i, resourseId);
+            }
+        } catch (Exception e) {
+            // Не будем экстренно прерывать работу потока никак, кроме return,
+            // в таком случае он, возможно, успеет завершить работу штатно.
+            System.out.printf("[%s] [%s] Поток был прерван во время работы с ресурсом. Ошибка [%s]\n", guid, LocalDateTime.now(), e);
+            return;
         }
 
         System.out.format("[%s] [%s] Опрос ресурса [%s] завершён. Имя потока [%s]. \n", guid, LocalDateTime.now(), resourseId, Thread.currentThread().getName());
@@ -273,13 +291,18 @@ public class EmulatorThreadResourceWorking {
         * */
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             System.out.println("Завершение работы пула потоков...");
-            pool.shutdown();
+
+            // Завершаем текущие и отменяем следующие.
+            pool.shutdownNow();
             try {
-                if (!pool.awaitTermination(60, TimeUnit.SECONDS)) {
+                // Даём 15 секунд на штатное завершение. После 15 секунд завершение принудительное.
+                if (!pool.awaitTermination(15, TimeUnit.SECONDS)) {
                     System.out.println("Принудительное завершение всех потоков");
                     pool.shutdownNow();
                 }
             } catch (InterruptedException e) {
+                // Если что-то случится, завершаем текущий поток и пробуем ещё раз штатно завершить
+                // работающие потоки пулла.
                 Thread.currentThread().interrupt();
                 pool.shutdownNow();
             }
